@@ -1,0 +1,363 @@
+<!doctype html>
+<html lang="fr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"><meta name="theme-color" content="#a7e6ff"><title>Penguin Jump V10 — Powder Rush</title>
+<style>*{box-sizing:border-box}html,body{margin:0;height:100%;overflow:hidden;background:#a7e6ff;font-family:system-ui,-apple-system,sans-serif;touch-action:none;overscroll-behavior:none}canvas{display:block;width:100%;height:100%;touch-action:none;-webkit-user-select:none;user-select:none}#hud{position:fixed;top:max(14px,env(safe-area-inset-top));left:16px;right:16px;display:flex;justify-content:space-between;pointer-events:none;color:#163e60;text-shadow:0 1px #fff9;font-weight:900;font-size:18px}#hint{position:fixed;bottom:max(22px,env(safe-area-inset-bottom));width:100%;text-align:center;color:#174766;font-weight:700;pointer-events:none;font-size:14px}#panel{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;background:#15415a44;padding:24px}#card{background:#fffef5;border-radius:24px;padding:27px 22px;text-align:center;width:min(350px,100%);box-shadow:0 14px 50px #174a6466;color:#174766}h1{font-size:32px;margin:0 0 8px}p{line-height:1.45}button{border:0;border-radius:15px;background:#ffb443;color:#3e2b11;font-size:20px;font-weight:900;padding:15px 32px;cursor:pointer}#soundToggle{position:fixed;right:14px;bottom:max(58px,env(safe-area-inset-bottom));z-index:4;border-radius:50%;padding:9px 12px;font-size:21px;background:#ffffffdd;box-shadow:0 2px 12px #174a6433}#musicToggle{position:fixed;right:14px;bottom:max(112px,calc(env(safe-area-inset-bottom) + 54px));z-index:4;border-radius:50%;padding:9px 12px;font-size:21px;background:#ffffffdd;box-shadow:0 2px 12px #174a6433}#stats{font-size:14px;color:#37647b;margin-bottom:16px}</style></head>
+<body><canvas id="game"></canvas><div id="hud"><span id="score">🧊 0</span><span id="best">🏆 0</span></div><div id="hint">Appui court = petit saut • Maintiens = grand saut</div><button id="soundToggle" aria-label="Couper le bruit de glisse">🔊</button><button id="musicToggle" aria-label="Couper la musique">🎵</button><div id="panel"><div id="card"><h1>🐧 Penguin Jump</h1><p>Version V10.2 — Chemin bonus en hauteur.<br>Ours blancs à éviter • Un poisson +5 sur une banquise supérieure toutes les 30 banquises !<br>Appui court : petit saut. Maintiens espace ou le doigt pour sauter plus haut et plus loin. Aucun saut après le bord, aucun appui mémorisé.</p><div id="stats">Nouvelles sensations de glisse • portrait et paysage</div><button id="start">Jouer !</button></div></div>
+<script>
+(()=>{'use strict';
+const canvas=document.getElementById('game'),ctx=canvas.getContext('2d');
+const scoreEl=document.getElementById('score'),bestEl=document.getElementById('best'),panel=document.getElementById('panel'),card=document.getElementById('card');
+let W=0,H=0,dpr=1,zoom=1,portrait=false,groundY=0,scale=1,platforms=[],player={},camera=0,score=0,best=0,state='menu',last=0,elapsed=0,particles=[],flash=0,platformCount=0,cloudEvents=[],lastCloudMilestone=0,snowTrail=[],skiFlow=0,bears=[],fishes=[],bonusScore=0,upperPlatforms=[];
+try{best=Number(localStorage.getItem('penguinBestV5')||0)}catch(e){}
+bestEl.textContent='🏆 '+best;
+// Sons synthétisés en direct : aucun téléchargement audio ni dépendance externe.
+let audioCtx=null,noiseBuffer=null,glideSource=null,glideGain=null,glideFilter=null,soundOn=true,masterAudio=null;
+const soundButton=document.getElementById('soundToggle');
+function audioReady(){
+ if(!soundOn&&!musicOn)return false;
+ try{
+  if(!audioCtx){
+   const AC=window.AudioContext||window.webkitAudioContext;
+   if(!AC)return false;
+   audioCtx=new AC();
+   // Gain commun : niveaux audibles sur les petits haut-parleurs d'iPhone.
+   masterAudio=audioCtx.createGain();masterAudio.gain.value=1.75;
+   masterAudio.connect(audioCtx.destination);
+   noiseBuffer=audioCtx.createBuffer(1,audioCtx.sampleRate*2,audioCtx.sampleRate);
+   const data=noiseBuffer.getChannelData(0);
+   for(let i=0;i<data.length;i++)data[i]=Math.random()*2-1;
+  }
+  if(audioCtx.state!=='running')audioCtx.resume().catch(()=>{});
+  return true;
+ }catch(e){return false;}
+}
+function unlockAudio(){
+ if(!audioReady()||!audioCtx)return;
+ try{
+  const o=audioCtx.createOscillator(),g=audioCtx.createGain();
+  g.gain.value=.00001;o.connect(g);g.connect(masterAudio||audioCtx.destination);
+  o.start();o.stop(audioCtx.currentTime+.025);
+  audioCtx.resume().catch(()=>{});
+ }catch(e){}
+}
+function startGlide(){
+ if(!audioReady()||glideSource)return;
+ try{
+  glideSource=audioCtx.createBufferSource();glideSource.buffer=noiseBuffer;glideSource.loop=true;
+  glideFilter=audioCtx.createBiquadFilter();glideFilter.type='lowpass';glideFilter.frequency.value=550;
+  glideGain=audioCtx.createGain();glideGain.gain.value=0;
+  glideSource.connect(glideFilter);glideFilter.connect(glideGain);glideGain.connect(masterAudio||audioCtx.destination);
+  glideSource.start();
+ }catch(e){glideSource=null;}
+}
+function stopGlide(){
+ if(glideGain&&audioCtx)glideGain.gain.setTargetAtTime(0,audioCtx.currentTime,.025);
+}
+function updateSound(speed){
+ if(!soundOn||state!=='playing'||!player.onGround){stopGlide();return;}
+ startGlide();if(!glideGain||!audioCtx)return;
+ const now=audioCtx.currentTime;
+ glideGain.gain.setTargetAtTime(.045+Math.min(speed/340,1)*.045,now,.09);
+ glideFilter.frequency.setTargetAtTime(360+speed*1.55,now,.12);
+}
+soundButton.addEventListener('click',()=>{
+ soundOn=!soundOn;soundButton.textContent=soundOn?'🔊':'🔇';
+ soundButton.setAttribute('aria-label',soundOn?'Couper le bruit de glisse':'Activer le bruit de glisse');
+ if(soundOn)unlockAudio();else stopGlide();
+});
+// Mélodie originale synthétisée : aucun fichier audio ni musique sous licence.
+// Boucle en 4 mesures, 116 BPM. Niveau faible pour laisser respirer la glisse.
+let musicOn=true,musicStep=0,nextMusicAt=0;
+const musicButton=document.getElementById('musicToggle');
+const melody=[
+  76,null,79,81,79,null,76,74, 72,null,76,79,76,null,74,null,
+  76,null,79,83,81,null,79,76, 74,null,76,79,74,null,72,null,
+  72,null,76,79,81,null,79,76, 74,null,72,74,76,null,79,null,
+  81,null,79,76,74,null,72,74, 76,null,79,76,72,null,null,null
+];
+const bass=[48,48,53,53,45,45,43,43];
+function tone(midi,when,duration,volume,wave='triangle'){
+ if(!audioCtx)return;
+ const osc=audioCtx.createOscillator(),gain=audioCtx.createGain();
+ osc.type=wave;osc.frequency.setValueAtTime(440*Math.pow(2,(midi-69)/12),when);
+ gain.gain.setValueAtTime(.0001,when);
+ gain.gain.exponentialRampToValueAtTime(Math.max(.0002,volume),when+.015);
+ gain.gain.exponentialRampToValueAtTime(.0001,when+duration);
+ osc.connect(gain);gain.connect(masterAudio||audioCtx.destination);
+ osc.start(when);osc.stop(when+duration+.025);
+}
+function musicTick(){
+ if(!musicOn||state!=='playing'||!audioCtx||audioCtx.state!=='running')return;
+ const beat=60/116,step=beat/2;
+ if(nextMusicAt<audioCtx.currentTime-.3)nextMusicAt=audioCtx.currentTime+.045;
+ let count=0;
+ while(nextMusicAt<audioCtx.currentTime+.13&&count++<5){
+  const n=melody[musicStep%melody.length];
+  if(n!==null)tone(n,nextMusicAt,step*.77,.032,'sine');
+  if(musicStep%4===0)tone(bass[Math.floor(musicStep/8)%bass.length],nextMusicAt,beat*.85,.024,'triangle');
+  if(musicStep%8===4)tone(bass[Math.floor(musicStep/8)%bass.length]+7,nextMusicAt,step*.7,.012,'sine');
+  musicStep++;nextMusicAt+=step;
+ }
+}
+musicButton.addEventListener('click',()=>{
+ musicOn=!musicOn;
+ musicButton.textContent=musicOn?'🎵':'🔕';
+ musicButton.setAttribute('aria-label',musicOn?'Couper la musique':'Activer la musique');
+ if(musicOn){unlockAudio();nextMusicAt=audioCtx?audioCtx.currentTime+.07:0;}
+});
+const rand=(a,b)=>a+Math.random()*(b-a),clamp=(x,a,b)=>Math.max(a,Math.min(b,x));
+function resize(){
+ const physicalW=innerWidth,physicalH=innerHeight;
+ portrait=physicalH>physicalW*1.18;
+ // En portrait, dézoomer le MONDE (pas les boutons) pour voir les prochains trous.
+ zoom=portrait?clamp(physicalW/540,.57,.82):1;
+ W=physicalW/zoom;H=physicalH/zoom;
+ dpr=Math.min(devicePixelRatio||1,2);
+ canvas.width=Math.round(physicalW*dpr);canvas.height=Math.round(physicalH*dpr);
+ ctx.setTransform(dpr*zoom,0,0,dpr*zoom,0,0);
+ scale=1;groundY=H*(portrait?.73:.72);
+ if(state==='playing'&&player&&Number.isFinite(player.x)){
+   // Conserver la position du joueur sur sa glace lors d'une rotation.
+   const p=player.upper||platforms[player.platform];
+   if(p&&player.onGround)player.y=surface(p,player.x)-39;
+ }
+}
+addEventListener('resize',resize);resize();
+function init(){unlockAudio();stopGlide();musicStep=0;nextMusicAt=audioCtx?audioCtx.currentTime+.12:0;score=0;camera=0;elapsed=0;flash=0;particles=[];cloudEvents=[];lastCloudMilestone=0;platformCount=0;snowTrail=[];skiFlow=0;bears=[];fishes=[];bonusScore=0;upperPlatforms=[];platforms=[{x:-100,w:290,top:0,endTop:0,zone:'normal',passed:true}];let end=190;for(let i=0;i<18;i++){let p=makePlatform(end,++platformCount);platforms.push(p);decoratePlatform(p,platformCount);end=p.x+p.w;}player={x:95,y:groundY-39,vy:0,onGround:true,platform:0,alive:true,rotation:0,hold:false,holdTime:0};updateHud();state='playing';panel.style.display='none';last=performance.now();}
+// Le terrain alterne des séquences, plutôt qu'une seule taille de banquise.
+// Les grands trous sont précédés de pistes d'élan et restent bornés par
+// une estimation prudente de la portée d'un saut long.
+function makePlatform(end,i){
+ // 8 premiers sauts actifs. Ensuite, une montée et une descente
+ // raccordées, mais l'ensemble ne dépasse pas ~2,7 s à 175 px/s.
+ const cycle=i<=8?-1:(i-9)%13;
+ const intensity=i<12?0:i<25?1:i<40?2:3;
+ let type='normal',gap,w,top,endTop,zone='normal';
+ const previous=platforms.findLast(p=>Math.abs(p.x+p.w-end)<0.01);
+ if(i>=18&&i%20===0 && i%30!==0){
+   type='bear';gap=rand(45,65);w=rand(265,315);
+   top=rand(-10,10);endTop=top+rand(-8,8);
+ }else if(i>=30&&i%30===0){
+   type='fish';gap=rand(42,58);w=rand(270,320);
+   top=rand(-18,5);endTop=top+rand(-12,12);
+ }else if(i<=8){gap=rand(48,75);w=rand(115,170);top=rand(-10,12);endTop=top+rand(-12,12);}
+ else if(cycle===0||cycle===1){
+   type=cycle===0?'iceberg-up':'iceberg-down';
+   gap=cycle===0?rand(45,65):0;
+   w=rand(185,220);
+   top=cycle===1&&previous?previous.endTop:rand(-8,8);
+   endTop=top+(cycle===0?-rand(35,48):rand(35,48));
+ }else if(cycle===2){
+   type='rest';gap=rand(38,55);w=rand(170,210);
+   top=rand(-10,10);endTop=top+rand(-5,10);zone='melt';
+ }else if(cycle===3||cycle===4||cycle===5){
+   type='small';gap=rand(38+intensity*3,63+intensity*5);w=rand(95-intensity*5,135-intensity*5);
+   top=rand(-15,20);endTop=top+rand(-12,12);
+ }else if(cycle===6){
+   type='long-gap';gap=rand(125+intensity*5,150+intensity*6);w=rand(170,210);
+   top=rand(-10,15);endTop=top+rand(-12,12);
+ }else{
+   gap=rand(48+intensity*3,78+intensity*4);w=rand(125-intensity*4,175-intensity*5);
+   top=rand(-12,16);endTop=top+rand(-20,20);
+ }
+ return {x:end+gap,w,top,endTop,zone,type,passed:false};
+}
+function decoratePlatform(p,i){
+ if(p.type==='bear')bears.push({p,x:p.x+p.w*.66,phase:i*.9});
+ if(p.type==='fish'){
+   // Chemin supérieur optionnel : le chemin du bas reste praticable.
+   const upper={x:p.x+42,w:p.w-72,top:p.top-106,endTop:p.top-106,zone:'normal',type:'upper',passed:true};
+   upperPlatforms.push(upper);
+   fishes.push({p:upper,x:upper.x+upper.w*.64,got:false,phase:i*.7});
+ }
+}
+function surface(p,x){
+ let t=clamp((x-p.x)/p.w,0,1);
+ // Smoothstep donne un sommet et un pied de pente sans cassure.
+ let eased=t*t*(3-2*t);
+ return groundY+p.top+(p.endTop-p.top)*eased;
+}
+function slope(p,x){let t=clamp((x-p.x)/p.w,0,1);return (p.endTop-p.top)*6*t*(1-t)/p.w;}
+function updateHud(){scoreEl.textContent='🧊 '+score+(bonusScore?'  🐟 +'+bonusScore:'');bestEl.textContent='🏆 '+best;}
+function jump(){
+ if(state!=='playing'||!player.onGround)return;
+ const p=platforms[player.platform];
+ // Strict : une fois le bord franchi, aucun saut n'est possible.
+ if(!p||player.x>p.x+p.w)return;
+ player.vy=-430;player.hold=true;player.holdTime=0;
+ player.onGround=false;player.rotation=-.15;stopGlide();
+}
+function burst(x,y,color,n){for(let i=0;i<n;i++)particles.push({x,y,vx:rand(-120,120),vy:rand(-150,0),life:rand(.3,.7),color});}
+function die(){if(state!=='playing')return;state='dead';stopGlide();burst(player.x,player.y,'#c9f3ff',22);if(score>best){best=score;try{localStorage.setItem('penguinBestV5',String(best))}catch(e){}}updateHud();setTimeout(()=>{if(state!=='dead')return;card.innerHTML='<h1>💦 Plouf !</h1><p>Score : <b>'+score+'</b><br>Record : <b>'+best+'</b></p><div id="stats">'+(score>=best&&score>0?'Nouveau record ! 🏆':'Encore une petite partie ?')+'</div><button id="start">Rejouer</button>';document.getElementById('start').onclick=init;panel.style.display='flex';},650);}
+function input(e){if(e.cancelable)e.preventDefault();unlockAudio();if(state==='playing')jump();}
+function release(){player.hold=false;}
+canvas.addEventListener('pointerdown',input,{passive:false});window.addEventListener('pointerup',release);window.addEventListener('pointercancel',release);canvas.addEventListener('pointerleave',release);window.addEventListener('blur',release);
+document.getElementById('start').onclick=init;
+document.addEventListener('keydown',e=>{if(e.code==='Space'||e.code==='ArrowUp'){e.preventDefault();if(e.repeat)return;if(state==='playing')jump();else if(state==='dead'||state==='menu')init();}});
+document.addEventListener('keyup',e=>{if(e.code==='Space'||e.code==='ArrowUp')release();});
+function update(dt){if(state!=='playing')return;elapsed+=dt;flash=Math.max(0,flash-dt);const active=player.upper||platforms[player.platform]||platforms[0];// Alternance de vagues de vitesse : 4 à 7 banquises plus nerveuses,
+ // puis une vraie accalmie. La difficulté augmente progressivement.
+ const wave=Math.sin(score*0.63-1.2);
+ const surge=Math.max(0,wave)*34;
+ const calm=Math.max(0,-wave)*18;
+ const baseSpeed=clamp(180+score*.95+surge-calm,165,270);
+ const grade=player.onGround?slope(active,player.x):0;
+ const targetSpeed=clamp(baseSpeed+grade*360-(player.onGround&&active.zone==='melt'?42:0),125,335);
+ // Inertie douce : on ressent la descente, puis le ralentissement.
+ if(!Number.isFinite(skiFlow)||skiFlow===0)skiFlow=targetSpeed;
+ skiFlow+=(targetSpeed-skiFlow)*Math.min(1,dt*(grade>0?2.5:3.7));
+ const speed=skiFlow;const oldY=player.y,oldX=player.x;updateSound(speed);player.x+=speed*dt;
+ if(player.onGround){
+   const chance=clamp((speed-130)/210,.12,.9);
+   if(Math.random()<chance*dt*45){
+     const px=player.x-rand(9,24),py=surface(active,Math.min(active.x+active.w,Math.max(active.x,player.x)))-17;
+     snowTrail.push({x:px,y:py,vx:rand(-45,-10)-speed*.13,vy:rand(-65,-12),life:rand(.23,.52),r:rand(1.3,3.2)});
+   }
+ }
+ if(!player.onGround){if(player.hold&&player.vy<0&&player.holdTime<.27){const activeHold=Math.min(dt,.27-player.holdTime);player.vy-=1450*activeHold;player.holdTime+=activeHold;}player.vy+=1450*dt;player.y+=player.vy*dt;player.rotation=clamp(player.vy/1100,-.28,.5);if(player.vy>=0){
+ // Détection continue : on compare la trajectoire des pieds à la vraie
+ // courbe de la glace, même quand elle monte ou descend entre deux images.
+ // Le contact doit être descendant et avoir lieu sur la banquise.
+ let idx=-1, hitX=player.x, hitT=2;
+ for(let i=0;i<platforms.length+upperPlatforms.length;i++){
+  const p=i<platforms.length?platforms[i]:upperPlatforms[i-platforms.length];
+  if(player.x<p.x||oldX>p.x+p.w)continue;
+  const steps=12;
+  for(let k=1;k<=steps;k++){
+   const t0=(k-1)/steps,t1=k/steps;
+   const x0=oldX+(player.x-oldX)*t0,x1=oldX+(player.x-oldX)*t1;
+   if(x1<p.x||x0>p.x+p.w)continue;
+   const a=Math.max(t0,(p.x-oldX)/(player.x-oldX||1));
+   const b=Math.min(t1,(p.x+p.w-oldX)/(player.x-oldX||1));
+   if(a>b)continue;
+   const xa=oldX+(player.x-oldX)*a,xb=oldX+(player.x-oldX)*b;
+   const da=(oldY+(player.y-oldY)*a)-(surface(p,xa)-39);
+   const db=(oldY+(player.y-oldY)*b)-(surface(p,xb)-39);
+   if(da<=0&&db>=0){
+    const fraction=Math.abs(da-db)>1e-8?clamp(-da/(db-da),0,1):0;
+    const hit=a+(b-a)*fraction;
+    if(hit<hitT){hitT=hit;idx=i;hitX=oldX+(player.x-oldX)*hit;}
+    break;
+   }
+  }
+ }
+ if(idx>=0){
+  const landed=idx<platforms.length?platforms[idx]:upperPlatforms[idx-platforms.length];
+  player.x=hitX;player.y=surface(landed,hitX)-39;
+  player.vy=0;player.onGround=true;player.hold=false;
+  player.upper=idx>=platforms.length?landed:null;
+  if(!player.upper)player.platform=idx;
+  player.rotation=Math.atan(slope(landed,player.x));
+  if(!landed.passed){
+   landed.passed=true;score++;updateHud();if(score%20===0&&score!==lastCloudMilestone){lastCloudMilestone=score;cloudEvents.push({x:player.x+W*.70,kind:Math.floor(score/20-1)%4,life:16,drift:rand(9,16),phase:rand(0,6.28)});}
+   burst(player.x,player.y,'#fff',6);
+  }
+ }
+}}
+else{
+ let p=player.upper||platforms[player.platform];
+ // Sur une piste continue, passer à la section suivante sans tomber.
+ // Un vrai trou reste un trou : aucun saut ou atterrissage fictif.
+ while(p && player.x>p.x+p.w){
+   if(player.upper){player.upper=null;player.onGround=false;player.upper=null;player.hold=false;player.vy=40;break;}
+   const next=platforms[player.platform+1];
+   if(next && next.x<=p.x+p.w+0.01){
+     player.platform++;
+     p=next;
+     if(!p.passed){
+       p.passed=true;score++;updateHud();
+       if(score%20===0&&score!==lastCloudMilestone){
+         lastCloudMilestone=score;
+         cloudEvents.push({x:player.x+W*.70,kind:Math.floor(score/20-1)%4,life:16,drift:rand(9,16),phase:rand(0,6.28)});
+       }
+     }
+   }else{
+     player.onGround=false;player.upper=null;player.hold=false;player.vy=40;break;
+   }
+ }
+ if(player.onGround&&p){
+   player.y=surface(p,player.x)-39;
+   player.rotation=Math.atan(slope(p,player.x));
+ }
+}
+// Collision de l'ours : sauter au-dessus, pas de contact fictif.
+ for(const bear of bears){
+  const bx=bear.x+Math.sin(elapsed*1.8+bear.phase)*12;
+  const by=surface(bear.p,bx)-15;
+  if(Math.abs(player.x-bx)<26 && player.y+22>by-33 && player.y-22<by+6){die();break;}
+ }
+ // Poisson suspendu au-dessus de la glace : saut long/haut récompensé.
+ for(const fish of fishes){
+  if(fish.got)continue;
+  const fy=surface(fish.p,fish.x)-41+Math.sin(elapsed*2+fish.phase)*5;
+  if(Math.abs(player.x-fish.x)<23 && Math.abs(player.y-fy)<28){
+   fish.got=true;score+=5;bonusScore+=5;updateHud();burst(fish.x,fy,'#ffe58c',14);
+  }
+ }
+ if(player.y>H+80)die();
+const target=player.x-W*(portrait?.19:.30);camera+=(target-camera)*Math.min(1,dt*5);
+let end=platforms[platforms.length-1].x+platforms[platforms.length-1].w;
+while(end<camera+W+650){const p=makePlatform(end,++platformCount);platforms.push(p);decoratePlatform(p,platformCount);end=p.x+p.w;}
+bears=bears.filter(b=>b.p.x+b.p.w>camera-250);
+ fishes=fishes.filter(f=>f.p.x+f.p.w>camera-250);
+ upperPlatforms=upperPlatforms.filter(p=>p.x+p.w>camera-250);
+ while(platforms.length>3&&platforms[0].x+platforms[0].w<camera-250){platforms.shift();player.platform=Math.max(0,player.platform-1);}
+for(const c of cloudEvents)c.x-=c.drift*dt;cloudEvents=cloudEvents.filter(c=>c.x>camera-180);for(const flake of snowTrail){flake.x+=flake.vx*dt;flake.y+=flake.vy*dt;flake.vy+=155*dt;flake.life-=dt;}
+ snowTrail=snowTrail.filter(f=>f.life>0);
+ for(const q of particles){q.x+=q.vx*dt;q.y+=q.vy*dt;q.vy+=250*dt;q.life-=dt;}particles=particles.filter(q=>q.life>0);
+}
+function roundRect(x,y,w,h,r,color){ctx.fillStyle=color;ctx.beginPath();ctx.roundRect(x,y,w,h,r);ctx.fill();}
+function animalCloud(x,y,kind){
+ ctx.save();ctx.translate(x,y);ctx.fillStyle='#ffffffa6';ctx.strokeStyle='#d9eff850';ctx.lineWidth=1;
+ function oval(cx,cy,rx,ry){ctx.beginPath();ctx.ellipse(cx,cy,rx,ry,0,0,Math.PI*2);ctx.fill();ctx.stroke();}
+ // All silhouettes use only white cloud shapes, no labels or bright badges.
+ if(kind===0){ // manchot
+  oval(0,0,20,29);oval(0,-26,18,18);oval(-22,7,10,18);oval(22,7,10,18);oval(-12,29,13,6);oval(12,29,13,6);
+ }else if(kind===1){ // phoque
+  oval(0,8,37,17);oval(-27,-5,17,17);oval(30,21,19,7);oval(-10,22,13,7);
+ }else if(kind===2){ // orque
+  oval(0,4,39,16);oval(-6,-15,9,24);oval(35,-3,15,6);oval(-40,6,10,20);
+ }else{ // ours blanc
+  oval(0,5,32,20);oval(-25,-11,16,16);oval(-35,-23,7,8);oval(-16,-23,7,8);oval(-22,24,10,11);oval(20,24,10,11);
+ }
+ ctx.restore();
+}
+function draw(){ctx.clearRect(0,0,W,H);const sky=ctx.createLinearGradient(0,0,0,H);sky.addColorStop(0,'#83d5fa');sky.addColorStop(.72,'#e3faff');sky.addColorStop(1,'#66c5e4');ctx.fillStyle=sky;ctx.fillRect(0,0,W,H);
+ctx.fillStyle='#ffffff8a';for(let i=0;i<8;i++){let x=((i*151-camera*.12)%(W+180)+W+180)%(W+180)-90,y=H*.12+(i%3)*H*.12;ctx.beginPath();ctx.ellipse(x,y,38,12,0,0,Math.PI*2);ctx.ellipse(x+19,y-6,26,14,0,0,Math.PI*2);ctx.fill();}
+// Faraway ice ridges drift slowly, giving a sense of speed and depth.
+ ctx.fillStyle='#d5f4fc99';ctx.beginPath();ctx.moveTo(0,groundY+10);
+ for(let x=0;x<=W+30;x+=30){let xx=x+camera*.035;ctx.lineTo(x,groundY-55-20*Math.sin(xx*.012)-10*Math.sin(xx*.031));}
+ ctx.lineTo(W,groundY+10);ctx.closePath();ctx.fill();
+ ctx.fillStyle='#289dce';ctx.fillRect(0,groundY+10,W,H-groundY);ctx.strokeStyle='#b9f4ff77';ctx.lineWidth=2;for(let j=0;j<6;j++){let y=groundY+28+j*33;ctx.beginPath();for(let x=0;x<=W;x+=12){const yy=y+Math.sin(x*.025+elapsed*2+j)*3;if(x===0)ctx.moveTo(x,yy);else ctx.lineTo(x,yy);}ctx.stroke();}
+
+for(const p of [...platforms,...upperPlatforms]){let x=p.x-camera;if(x>W+30||x+p.w< -30)continue;let gy=groundY+p.top;ctx.beginPath();ctx.moveTo(x,gy-15);for(let j=1;j<=24;j++){let wx=p.x+p.w*j/24;ctx.lineTo(wx-camera,surface(p,wx)-15);}ctx.lineTo(x+p.w,surface(p,p.x+p.w)+25);ctx.lineTo(x,gy+25);ctx.closePath();ctx.fillStyle=(p.type==='iceberg-up'||p.type==='iceberg-down')?'#8dcfdf':'#a7e1ef';ctx.fill();ctx.beginPath();for(let j=0;j<=24;j++){let wx=p.x+p.w*j/24;if(j===0)ctx.moveTo(wx-camera,surface(p,wx)-15);else ctx.lineTo(wx-camera,surface(p,wx)-15);}ctx.strokeStyle=p.zone==='melt'?'#c5e8ec':'#ffffff';ctx.lineWidth=13;ctx.lineCap='round';ctx.stroke();ctx.strokeStyle='#d9f8ff';ctx.lineWidth=3;ctx.stroke();if(p.type==='iceberg-up'||p.type==='iceberg-down'){ctx.fillStyle='#e7faffaa';for(let j=1;j<4;j++){let wx=p.x+p.w*j/5;let yy=surface(p,wx)+9;ctx.beginPath();ctx.ellipse(wx-camera,yy,14,3,0,0,Math.PI*2);ctx.fill();}}if(p.zone==='melt'){for(let j=0;j<3;j++){let wx=p.x+p.w*(.22+j*.24);let yy=surface(p,wx)-12;ctx.fillStyle='#73b8d0';ctx.beginPath();ctx.ellipse(wx-camera,yy,12,2.5,0,0,Math.PI*2);ctx.fill();}}}
+// Ours animé : visible assez tôt sur une grande banquise.
+for(const b of bears){
+ const bx=b.x+Math.sin(elapsed*1.4+b.phase)*8,by=surface(b.p,bx)-15;
+ if(bx-camera<-70||bx-camera>W+70)continue;
+ ctx.save();ctx.translate(bx-camera,by);
+ ctx.fillStyle='#ffffff';ctx.strokeStyle='#a8d4e3';ctx.lineWidth=1.8;
+ // Ours blanc : silhouette douce, corps, tête, oreilles et quatre pattes.
+ ctx.beginPath();ctx.ellipse(3,-18,25,15,0,0,Math.PI*2);ctx.fill();ctx.stroke();
+ for(const dx of [-12,15]){ctx.beginPath();ctx.ellipse(dx,-5,7,10,0,0,Math.PI*2);ctx.fill();ctx.stroke();}
+ ctx.beginPath();ctx.arc(-19,-29,14,0,Math.PI*2);ctx.fill();ctx.stroke();
+ for(const dx of [-27,-13]){ctx.beginPath();ctx.arc(dx,-40,5,0,Math.PI*2);ctx.fill();ctx.stroke();}
+ ctx.fillStyle='#263a48';ctx.beginPath();ctx.arc(-29,-27,2.4,0,Math.PI*2);ctx.arc(-14,-31,2,0,Math.PI*2);ctx.fill();
+ ctx.restore();
+}
+for(const f of fishes){
+ if(f.got||f.x-camera<-50||f.x-camera>W+50)continue;
+ const fy=surface(f.p,f.x)-41+Math.sin(elapsed*2+f.phase)*5;
+ ctx.save();ctx.translate(f.x-camera,fy);ctx.rotate(Math.sin(elapsed*3)*.12);
+ ctx.fillStyle='#ffca55';ctx.strokeStyle='#dc8b28';ctx.lineWidth=2;
+ ctx.beginPath();ctx.ellipse(0,0,15,8,0,0,Math.PI*2);ctx.fill();ctx.stroke();
+ ctx.beginPath();ctx.moveTo(-12,0);ctx.lineTo(-23,-10);ctx.lineTo(-23,10);ctx.closePath();ctx.fill();ctx.stroke();
+ ctx.fillStyle='#26394d';ctx.beginPath();ctx.arc(8,-2,1.8,0,Math.PI*2);ctx.fill();ctx.restore();
+}
+if(state==='playing'||state==='dead'){let x=player.x-camera,y=player.y;ctx.save();ctx.translate(x,y);ctx.rotate(player.rotation);ctx.fillStyle='#25394d';ctx.beginPath();ctx.ellipse(0,0,17,24,0,0,Math.PI*2);ctx.fill();ctx.fillStyle='#f8fbf6';ctx.beginPath();ctx.ellipse(5,5,11,16,0,0,Math.PI*2);ctx.fill();ctx.fillStyle='#26394d';ctx.beginPath();ctx.ellipse(-15,6,7,12,-.4,0,Math.PI*2);ctx.fill();ctx.fillStyle='#fff';ctx.beginPath();ctx.arc(9,-9,5,0,Math.PI*2);ctx.fill();ctx.fillStyle='#1e3545';ctx.beginPath();ctx.arc(11,-9,2,0,Math.PI*2);ctx.fill();ctx.fillStyle='#f9a93c';ctx.beginPath();ctx.moveTo(15,-3);ctx.lineTo(28,2);ctx.lineTo(15,5);ctx.fill();roundRect(-11,20,13,5,2,'#f9a93c');roundRect(3,20,13,5,2,'#f9a93c');ctx.restore();}
+for(const f of snowTrail){ctx.globalAlpha=clamp(f.life*2.8,0,.82);ctx.fillStyle='#ffffff';ctx.beginPath();ctx.arc(f.x-camera,f.y,f.r,0,Math.PI*2);ctx.fill();}ctx.globalAlpha=1;
+ for(const q of particles){ctx.globalAlpha=clamp(q.life*2,0,1);ctx.fillStyle=q.color;ctx.beginPath();ctx.arc(q.x-camera,q.y,3,0,Math.PI*2);ctx.fill();}ctx.globalAlpha=1;
+
+}
+function frame(now){let dt=Math.min((now-last)/1000,.033);last=now;update(dt);musicTick();draw();requestAnimationFrame(frame);}requestAnimationFrame(frame);
+})();
+</script></body></html>
